@@ -1012,7 +1012,7 @@ class MinFluxLocator:
         # log-likelihood function
         for i in np.arange(self.K):
             self.l_aux[i, :, :] = n[i] * self.logs[i]
-        # print(self.l_aux == n[:,np.newaxis,np.newaxis] * self.logs)
+
         likelihood = np.sum(self.l_aux, axis=0)
 
         if prior == "r<L":

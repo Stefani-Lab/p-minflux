@@ -531,3 +531,74 @@ def likelihood(K, PSF, n, λb, pos_nm, step_nm, size_nm):
     return Like
 
 
+class MinFluxLocator:
+    """Caching MINFLUX position estimator (using MLE)
+
+    Precomputes everything that does not depend on photon counts
+    
+    Use
+    ---
+    >>> locator = MinFluxLocator(PSFs, background, pixel_size)
+    >>> n = get_data_from_source()
+    >>> indices, position, likelihood = locator(n) 
+    """
+    def __init__(self, PSF, SBR, step_nm=1):
+        """Precompute everything.
+        Inputs
+        ------
+        PSF : array with EBP (K x size x size)
+        SBR : estimated (exp) Signal to Bkgd Ratio
+        step_nm : grid px in nm
+        """
+        self.PSF = PSF
+        self.SBR = SBR
+        self.step_nm = step_nm
+        self._pre_process()
+
+    def _pre_process(self):
+        K = np.shape(self.PSF)[0]
+        self.K = K
+        SBR = self.SBR
+        size = np.shape(self.PSF)[1]
+        PSF = self.PSF / np.sum(self.PSF, axis=0)
+        # probabilitiy vector
+        prob = np.zeros((K, size, size))
+
+        for i in np.arange(K):
+            prob[i, :, :] = (SBR / (SBR + 1.)) * PSF[i, :, :] + (1. / (SBR + 1.)) * (
+                1 / K
+            )
+
+        # log-likelihood function
+        self.logs = np.zeros((K, size, size))
+        for i in np.arange(K):
+            self.logs[i, :, :] = np.log(prob[i, :, :])
+        self.l_aux = np.zeros((K, size, size))
+
+    def __call__(self, n):
+        """Estimate MINFLUX position.
+
+        Parameters
+        ----------
+        n : acquired photon collection (K)
+
+        Returns
+        -------
+        A 3-member tuple of:
+            - position indices
+            - position in nm
+            - Likelihood function
+
+        """
+        # log-likelihood function
+        for i in np.arange(self.K):
+            self.l_aux[i, :, :] = n[i] * self.logs[i]
+
+        Ltot = np.sum(self.l_aux, axis=0)
+
+        # maximum likelihood estimator for the position
+        indrec = np.unravel_index(np.argmax(Ltot, axis=None), Ltot.shape)
+
+        pos_estimator = indexToSpace(indrec, self.size, self.step_nm)
+
+        return indrec, pos_estimator, Ltot
