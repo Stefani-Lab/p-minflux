@@ -950,3 +950,80 @@ def pos_MINFLUX(n, PSF, SBR, px_nm=1, prior=None, L=None, DEBUG=False):
     return mle_index
 
 
+class MinFluxLocator:
+    """Caching MINFLUX position estimator (using MLE)
+
+    Precomputes everything that does not depend on photon counts
+    """
+    def __init__(self, PSF, SBR, px_nm=1):
+        """Precompute everything.
+        Inputs
+        ------
+        PSF : array with EBP (K x size x size)
+        SBR : estimated (exp) Signal to Bkgd Ratio
+        px_nm : grid px in nm
+        """
+        self.PSF = PSF
+        self.SBR = SBR
+        self.px_nm = px_nm
+        self._pre_process()
+
+    def _pre_process(self):
+        K = np.shape(self.PSF)[0]
+        self.K = K
+        SBR = self.SBR
+        size = np.shape(self.PSF)[1]
+        print("Initializing pMinfluxLocator with ", K, "beams of ", size, " pixels")
+        PSF = self.PSF / np.sum(self.PSF, axis=0)
+        # probabilitiy vector
+        prob = np.zeros((K, size, size))
+
+        for i in np.arange(K):
+            prob[i, :, :] = (SBR / (SBR + 1.)) * PSF[i, :, :] + (1. / (SBR + 1.)) * (
+                1 / K
+            )
+
+        # log-likelihood function
+        self.logs = np.zeros((K, size, size))
+        for i in np.arange(K):
+            self.logs[i, :, :] = np.log(prob[i, :, :])
+        self.l_aux = np.zeros((K, size, size))
+        # prepare for prior == "r<L":
+        x = np.arange(-size / 2, size / 2)
+        y = np.arange(-size / 2, size / 2)
+
+        Mx, My = np.meshgrid(x, y)
+        self._Mr = np.sqrt(Mx**2 + My**2)
+        # Podriamos preparar un slice para este uso:
+        # likelihood[Mr > L / 2] = -np.inf
+
+    def __call__(self, n, prior=None, L=None, DEBUG=False):
+        """Estimate MINFLUX position.
+
+        Parameters
+        ----------
+        n : acquired photon collection (K)
+
+        Returns
+        -------
+        mle_index : position estimator in index coordinates (MLE)
+        likelihood : Likelihood function (if DEBUG)
+        """
+        # log-likelihood function
+        for i in np.arange(self.K):
+            self.l_aux[i, :, :] = n[i] * self.logs[i]
+
+        likelihood = np.sum(self.l_aux, axis=0)
+
+        if prior == "r<L":
+            likelihood[self.Mr > L / 2] = -np.inf
+
+        # maximum likelihood estimator for the position
+        mle_index = np.unravel_index(np.argmax(likelihood, axis=None), likelihood.shape)
+
+        # mle_nm = indexToSpace(mle_index, self.size, self.px_nm)
+
+        if DEBUG:
+            return mle_index, likelihood
+
+        return mle_index

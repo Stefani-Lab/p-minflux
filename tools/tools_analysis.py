@@ -7,11 +7,18 @@ Created on Wed Nov 18 20:53:34 2020
 """
 
 import numpy as np
-from skimage import io
+import numpy as io
+# from skimage import io
 from scipy import optimize as opt
 from scipy import ndimage as ndi
 import os
 import glob
+try:
+    import numba
+    _NUMBA_PRESENT = True
+except ImportError:
+    _NUMBA_PRESENT = False
+
 
 π = np.pi
 
@@ -530,4 +537,109 @@ def likelihood(K, PSF, n, λb, pos_nm, step_nm, size_nm):
         
     return Like
 
+if _NUMBA_PRESENT:
+    @numba.njit(nogil=True, parallel=True)
+    def _loc_helper(n, logs, likelihood):
+        likelihood[:] = n[0] * logs[0]
+        for k in range(n.shape[0]-1):
+            likelihood += n[k+1] * logs[k+1]
+        # maximum likelihood estimator for the position
+        i_max = np.argmax(likelihood)
+        return (i_max // likelihood.shape[0], i_max % likelihood.shape[0])
+
+class MinFluxLocator:
+    """Caching MINFLUX position estimator (using MLE)
+
+    Precomputes everything that does not depend on photon counts
+    
+    Use
+    ---
+    >>> locator = MinFluxLocator(PSFs, background, pixel_size)
+    >>> n = get_data_from_source()
+    >>> indices, position, likelihood = locator(n)
+
+    Uses numba if present.
+    Performance is aprox 5x faster than that of non caching implementation when
+    using plain numpy, and about 10x faster when numba is used.
+    """
+    def __init__(self, PSF, SBR, step_nm=1, use_numba=True):
+        """Precompute everything.
+        Inputs
+        ------
+        PSF : array with EBP (K x size x size)
+        SBR : estimated (exp) Signal to Bkgd Ratio
+        step_nm : grid px in nm
+        """
+        self.PSF = PSF
+        self.SBR = SBR
+        self.step_nm = step_nm
+        self._pre_process()
+        if use_numba:
+            if _NUMBA_PRESENT:
+                self._numba_precompile()
+                self._estimate = self._numba_estimate
+                np.moveaxis(self.logs, 0, -1)
+            else:
+                # TODO: use logger and warning
+                print("Numba requested but not present: ignoring")
+
+    def _pre_process(self):
+        K = np.shape(self.PSF)[0]
+        self.K = K
+        SBR = self.SBR
+        self.size = np.shape(self.PSF)[1]
+        size = self.size
+        PSF = self.PSF / np.sum(self.PSF, axis=0)
+        # probabilitiy vector
+        prob = np.zeros((K, size, size))
+
+        for i in np.arange(K):
+            prob[i, :, :] = (SBR / (SBR + 1.)) * PSF[i, :, :] + (1. / (SBR + 1.)) * (
+                1 / K
+            )
+
+        # log-likelihood function
+        self.logs = np.zeros((K, size, size))
+        self.LTot = np.zeros((size, size,))
+        for i in np.arange(K):
+            self.logs[i, :, :] = np.log(prob[i, :, :])
+        self.l_aux = np.zeros((K, size, size))
+
+    def _numba_precompile(self):
+        _loc_helper(np.zeros((self.K,)), self.logs, self.LTot)
+
+    def __call__(self, n):
+        return self._estimate(n)
+
+    def _estimate(self, n):
+        """Estimate MINFLUX position.
+
+        Parameters
+        ----------
+        n : acquired photon collection (K)
+
+        Returns
+        -------
+        A 3-member tuple of:
+            - position indices
+            - position in nm
+            - Likelihood function
+
+        """
+        # log-likelihood function
+        for i in range(self.K):
+            self.l_aux[i, :, :] = n[i] * self.logs[i]
+
+        self.LTot = np.sum(self.l_aux, axis=0)
+
+        # maximum likelihood estimator for the position
+        indrec = np.unravel_index(np.argmax(self.LTot, axis=None), self.LTot.shape)
+
+        pos_estimator = indexToSpace(indrec, self.size, self.step_nm)
+        return indrec, pos_estimator, self.LTot
+
+    def _numba_estimate(self, n):
+        indrec = _loc_helper(n, self.logs, self.LTot)
+        pos_estimator = indexToSpace(indrec, self.size, self.step_nm)
+        return indrec, pos_estimator, self.LTot
 
